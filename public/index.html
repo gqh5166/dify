@@ -390,9 +390,13 @@
     // 创建会话
     createBtn.addEventListener('click', async () => {
       connectWS();
-      setTimeout(() => {
-        ws.send(JSON.stringify({ type: 'create' }));
-      }, 500);
+      // 等待 WebSocket 连接就绪
+      const checkConnection = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          clearInterval(checkConnection);
+          ws.send(JSON.stringify({ type: 'create' }));
+        }
+      }, 100);
       createBtn.disabled = true;
       joinBtn.disabled = true;
     });
@@ -407,9 +411,13 @@
       roomId = room;
       isCreator = false;
       connectWS();
-      setTimeout(() => {
-        ws.send(JSON.stringify({ type: 'join', room }));
-      }, 500);
+      // 等待 WebSocket 连接就绪
+      const checkConnection = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          clearInterval(checkConnection);
+          ws.send(JSON.stringify({ type: 'join', room }));
+        }
+      }, 100);
       createBtn.disabled = true;
       joinBtn.disabled = true;
       // 生成 ECDH 密钥对
@@ -455,7 +463,8 @@
         const end = Math.min(start + CHUNK_SIZE, encryptedArray.length);
         const chunk = encryptedArray.slice(start, end);
         dc.send(chunk);
-        await new Promise(resolve => setTimeout(resolve, 10)); // 避免过快发送
+        // 小延迟避免过快发送导致 DataChannel 缓冲区溢出
+        await new Promise(resolve => setTimeout(resolve, 10));
       }
 
       updateStatus('图片已发送');
