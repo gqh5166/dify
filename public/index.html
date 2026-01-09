@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>P2P 阅后即焚图片传输</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
+    .container {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+      padding: 40px;
+      max-width: 600px;
+      width: 100%;
+    }
+    h1 {
+      text-align: center;
+      color: #333;
+      margin-bottom: 30px;
+      font-size: 24px;
+    }
+    .section {
+      margin-bottom: 20px;
+    }
+    .section h2 {
+      font-size: 18px;
+      margin-bottom: 10px;
+      color: #555;
+    }
+    button {
+      background: #667eea;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 16px;
+      transition: background 0.3s;
+      width: 100%;
+      margin-bottom: 10px;
+    }
+    button:hover:not(:disabled) {
+      background: #5568d3;
+    }
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    input[type="text"], input[type="file"] {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      margin-bottom: 10px;
+      font-size: 14px;
+    }
+    .status {
+      background: #f0f0f0;
+      padding: 15px;
+      border-radius: 6px;
+      margin-bottom: 20px;
+      font-size: 14px;
+      color: #666;
+      min-height: 50px;
+    }
+    .room-id {
+      background: #e8f4f8;
+      padding: 15px;
+      border-radius: 6px;
+      margin-bottom: 20px;
+      font-size: 16px;
+      text-align: center;
+      font-weight: bold;
+      color: #2196F3;
+    }
+    #canvas {
+      max-width: 100%;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      display: none;
+      margin: 20px auto;
+    }
+    .warning {
+      background: #fff3cd;
+      border: 1px solid #ffc107;
+      padding: 15px;
+      border-radius: 6px;
+      margin-bottom: 20px;
+      font-size: 13px;
+      color: #856404;
+    }
+    .progress {
+      width: 100%;
+      height: 20px;
+      background: #f0f0f0;
+      border-radius: 10px;
+      overflow: hidden;
+      margin-bottom: 10px;
+      display: none;
+    }
+    .progress-bar {
+      height: 100%;
+      background: #667eea;
+      transition: width 0.3s;
+      width: 0%;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔒 P2P 阅后即焚图片传输</h1>
+    
+    <div class="warning">
+      ⚠️ 安全提示：本应用使用端到端加密，服务器不保存任何图片或密钥。但无法阻止屏幕截图或相机拍照。请勿传输极度敏感内容。
+    </div>
+
+    <div class="status" id="status">准备就绪</div>
+
+    <div class="section" id="createSection">
+      <h2>发送端</h2>
+      <button id="createBtn">创建会话</button>
+      <div class="room-id" id="roomIdDisplay" style="display:none;"></div>
+      <input type="file" id="fileInput" accept="image/*" style="display:none;" />
+      <button id="sendBtn" style="display:none;">选择并发送图片</button>
+    </div>
+
+    <div class="section" id="joinSection">
+      <h2>接收端</h2>
+      <input type="text" id="roomInput" placeholder="输入房间 ID" />
+      <button id="joinBtn">加入会话</button>
+    </div>
+
+    <div class="progress" id="progress">
+      <div class="progress-bar" id="progressBar"></div>
+    </div>
+
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <script>
+    // 全局变量
+    let ws = null;
+    let pc = null;
+    let dc = null;
+    let roomId = null;
+    let isCreator = false;
+    let ecdhKeyPair = null;
+    let sharedKey = null;
+    let receivedChunks = [];
+    let totalChunks = 0;
+    let countdown = null;
+    let imageObjectUrl = null;
+
+    // DOM 元素
+    const status = document.getElementById('status');
+    const createBtn = document.getElementById('createBtn');
+    const joinBtn = document.getElementById('joinBtn');
+    const roomInput = document.getElementById('roomInput');
+    const roomIdDisplay = document.getElementById('roomIdDisplay');
+    const fileInput = document.getElementById('fileInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const progressDiv = document.getElementById('progress');
+    const progressBar = document.getElementById('progressBar');
+
+    // 连接 WebSocket
+    function connectWS() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${protocol}//${window.location.host}`);
+      
+      ws.onopen = () => {
+        updateStatus('已连接到信令服务器');
+      };
+
+      ws.onmessage = async (event) => {
+        const data = JSON.parse(event.data);
+        handleSignaling(data);
+      };
+
+      ws.onerror = () => {
+        updateStatus('连接错误');
+      };
+
+      ws.onclose = () => {
+        updateStatus('连接已断开');
+      };
+    }
+
+    // 处理信令消息
+    async function handleSignaling(data) {
+      const { type, room, payload } = data;
+
+      if (type === 'created') {
+        roomId = room;
+        isCreator = true;
+        roomIdDisplay.textContent = `房间 ID: ${roomId}`;
+        roomIdDisplay.style.display = 'block';
+        updateStatus('会话已创建，等待接收端加入...');
+        // 生成 ECDH 密钥对
+        await generateECDHKeyPair();
+      }
+
+      if (type === 'peer-joined') {
+        updateStatus('对端已加入，建立连接...');
+        if (isCreator) {
+          await createPeerConnection();
+          dc = pc.createDataChannel('image', { ordered: true });
+          setupDataChannel();
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          sendSignaling('offer', { offer });
+          // 发送公钥
+          sendPublicKey();
+        } else {
+          await createPeerConnection();
+        }
+      }
+
+      if (type === 'offer') {
+        await pc.setRemoteDescription(new RTCSessionDescription(payload.offer));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        sendSignaling('answer', { answer });
+      }
+
+      if (type === 'answer') {
+        await pc.setRemoteDescription(new RTCSessionDescription(payload.answer));
+      }
+
+      if (type === 'ice-candidate') {
+        if (payload.candidate) {
+          await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+        }
+      }
+
+      if (type === 'public-key') {
+        // 接收对端公钥并派生共享密钥
+        await deriveSharedKey(payload.publicKey);
+        if (!isCreator) {
+          // 接收端发送自己的公钥
+          sendPublicKey();
+        }
+      }
+
+      if (type === 'peer-left') {
+        updateStatus('对端已离开');
+        cleanup();
+      }
+
+      if (type === 'session-ended') {
+        updateStatus('会话已结束');
+        cleanup();
+      }
+
+      if (type === 'error') {
+        updateStatus(`错误: ${payload.message}`);
+      }
+    }
+
+    // 生成 ECDH 密钥对
+    async function generateECDHKeyPair() {
+      ecdhKeyPair = await window.crypto.subtle.generateKey(
+        { name: 'ECDH', namedCurve: 'P-256' },
+        true,
+        ['deriveKey', 'deriveBits']
+      );
+    }
+
+    // 发送公钥
+    async function sendPublicKey() {
+      const publicKeyJwk = await window.crypto.subtle.exportKey('jwk', ecdhKeyPair.publicKey);
+      sendSignaling('public-key', { publicKey: publicKeyJwk });
+    }
+
+    // 派生共享密钥
+    async function deriveSharedKey(peerPublicKeyJwk) {
+      const peerPublicKey = await window.crypto.subtle.importKey(
+        'jwk',
+        peerPublicKeyJwk,
+        { name: 'ECDH', namedCurve: 'P-256' },
+        true,
+        []
+      );
+
+      sharedKey = await window.crypto.subtle.deriveKey(
+        { name: 'ECDH', public: peerPublicKey },
+        ecdhKeyPair.privateKey,
+        { name: 'AES-GCM', length: 256 },
+        true,
+        ['encrypt', 'decrypt']
+      );
+
+      updateStatus('密钥协商完成，连接已加密');
+      
+      if (isCreator) {
+        sendBtn.style.display = 'block';
+      }
+    }
+
+    // 创建 PeerConnection
+    async function createPeerConnection() {
+      pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' }
+        ]
+      });
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          sendSignaling('ice-candidate', { candidate: event.candidate });
+        }
+      };
+
+      pc.ondatachannel = (event) => {
+        dc = event.channel;
+        setupDataChannel();
+      };
+
+      pc.onconnectionstatechange = () => {
+        updateStatus(`连接状态: ${pc.connectionState}`);
+        if (pc.connectionState === 'connected') {
+          updateStatus('P2P 连接已建立');
+        }
+      };
+    }
+
+    // 设置 DataChannel
+    function setupDataChannel() {
+      dc.binaryType = 'arraybuffer';
+
+      dc.onopen = () => {
+        updateStatus('数据通道已打开');
+      };
+
+      dc.onmessage = async (event) => {
+        if (typeof event.data === 'string') {
+          const meta = JSON.parse(event.data);
+          if (meta.type === 'metadata') {
+            totalChunks = meta.totalChunks;
+            receivedChunks = [];
+            progressDiv.style.display = 'block';
+            updateStatus(`接收中... 0/${totalChunks}`);
+            // 存储 metadata 到全局变量
+            window.imageMetadata = {
+              iv: new Uint8Array(meta.iv),
+              fileType: meta.fileType
+            };
+          }
+        } else {
+          receivedChunks.push(event.data);
+          const percent = Math.round((receivedChunks.length / totalChunks) * 100);
+          progressBar.style.width = percent + '%';
+          updateStatus(`接收中... ${receivedChunks.length}/${totalChunks}`);
+
+          if (receivedChunks.length === totalChunks) {
+            await handleReceivedImage();
+          }
+        }
+      };
+
+      dc.onclose = () => {
+        updateStatus('数据通道已关闭');
+      };
+    }
+
+    // 发送信令
+    function sendSignaling(type, payload) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type, room: roomId, payload }));
+      }
+    }
+
+    // 更新状态
+    function updateStatus(msg) {
+      status.textContent = msg;
+    }
+
+    // 创建会话
+    createBtn.addEventListener('click', async () => {
+      connectWS();
+      setTimeout(() => {
+        ws.send(JSON.stringify({ type: 'create' }));
+      }, 500);
+      createBtn.disabled = true;
+      joinBtn.disabled = true;
+    });
+
+    // 加入会话
+    joinBtn.addEventListener('click', async () => {
+      const room = roomInput.value.trim();
+      if (!room) {
+        alert('请输入房间 ID');
+        return;
+      }
+      roomId = room;
+      isCreator = false;
+      connectWS();
+      setTimeout(() => {
+        ws.send(JSON.stringify({ type: 'join', room }));
+      }, 500);
+      createBtn.disabled = true;
+      joinBtn.disabled = true;
+      // 生成 ECDH 密钥对
+      await generateECDHKeyPair();
+    });
+
+    // 选择并发送图片
+    sendBtn.addEventListener('click', () => {
+      fileInput.click();
+    });
+
+    fileInput.addEventListener('change', async (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      updateStatus('读取图片...');
+      const buffer = await file.arrayBuffer();
+
+      updateStatus('加密图片...');
+      const iv = window.crypto.getRandomValues(new Uint8Array(12));
+      const encrypted = await window.crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv },
+        sharedKey,
+        buffer
+      );
+
+      updateStatus('发送图片...');
+      const CHUNK_SIZE = 16384; // 16KB
+      const encryptedArray = new Uint8Array(encrypted);
+      const totalChunks = Math.ceil(encryptedArray.length / CHUNK_SIZE);
+
+      // 发送元数据（包含 IV 和分片信息）
+      dc.send(JSON.stringify({
+        type: 'metadata',
+        totalChunks,
+        iv: Array.from(iv),
+        fileType: file.type
+      }));
+
+      // 分片发送
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, encryptedArray.length);
+        const chunk = encryptedArray.slice(start, end);
+        dc.send(chunk);
+        await new Promise(resolve => setTimeout(resolve, 10)); // 避免过快发送
+      }
+
+      updateStatus('图片已发送');
+      sendBtn.disabled = true;
+      fileInput.value = '';
+    });
+
+    // 处理接收到的图片
+    async function handleReceivedImage() {
+      updateStatus('解密图片...');
+
+      // receivedChunks 只包含加密数据分片（metadata 已在 onmessage 中单独处理）
+      // 但我们需要从全局变量获取 metadata
+      // 让我们重新设计：使用全局变量存储 metadata
+      
+      // 合并所有加密数据分片
+      let totalSize = 0;
+      for (let i = 0; i < receivedChunks.length; i++) {
+        totalSize += receivedChunks[i].byteLength;
+      }
+      const combinedEncrypted = new Uint8Array(totalSize);
+      let offset = 0;
+      for (let i = 0; i < receivedChunks.length; i++) {
+        combinedEncrypted.set(new Uint8Array(receivedChunks[i]), offset);
+        offset += receivedChunks[i].byteLength;
+      }
+
+      try {
+        const decrypted = await window.crypto.subtle.decrypt(
+          { name: 'AES-GCM', iv: window.imageMetadata.iv },
+          sharedKey,
+          combinedEncrypted
+        );
+
+        // 显示图片
+        const blob = new Blob([decrypted], { type: window.imageMetadata.fileType || 'image/png' });
+        imageObjectUrl = URL.createObjectURL(blob);
+        const img = new Image();
+        img.onload = () => {
+          canvas.width = img.width;
+          canvas.height = img.height;
+          ctx.drawImage(img, 0, 0);
+          
+          // 添加水印
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+          ctx.font = '20px Arial';
+          ctx.fillText('阅后即焚 - 10秒后销毁', 10, 30);
+          
+          canvas.style.display = 'block';
+          updateStatus('图片已显示，10秒后自动销毁');
+          
+          // 开始倒计时
+          startCountdown();
+        };
+        img.src = imageObjectUrl;
+      } catch (e) {
+        updateStatus('解密失败: ' + e.message);
+        console.error(e);
+      }
+
+      progressDiv.style.display = 'none';
+    }
+
+    // 开始倒计时
+    function startCountdown() {
+      let seconds = 10;
+      countdown = setInterval(() => {
+        seconds--;
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+        ctx.font = '20px Arial';
+        ctx.fillText(`${seconds}秒后销毁`, canvas.width - 120, 30);
+        
+        if (seconds <= 0) {
+          clearInterval(countdown);
+          destroyImage();
+        }
+      }, 1000);
+    }
+
+    // 销毁图片并清理
+    function destroyImage() {
+      // 清空 canvas
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      canvas.style.display = 'none';
+      
+      // 撤销 object URL
+      if (imageObjectUrl) {
+        URL.revokeObjectURL(imageObjectUrl);
+        imageObjectUrl = null;
+      }
+      
+      // 清零敏感数据
+      // 注意：JavaScript 无法保证立即释放内存，这里尽最大努力
+      receivedChunks = [];
+      if (sharedKey) {
+        // 无法直接清零 CryptoKey，但可以置空引用
+        sharedKey = null;
+      }
+      if (ecdhKeyPair) {
+        ecdhKeyPair = null;
+      }
+      
+      updateStatus('图片已销毁，会话结束');
+      
+      // 通知服务器销毁房间
+      sendSignaling('consumed', {});
+      
+      // 关闭连接
+      setTimeout(() => {
+        cleanup();
+      }, 1000);
+    }
+
+    // 清理连接
+    function cleanup() {
+      if (dc) {
+        dc.close();
+        dc = null;
+      }
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+      if (ws) {
+        ws.close();
+        ws = null;
+      }
+      if (countdown) {
+        clearInterval(countdown);
+        countdown = null;
+      }
+      // 清理敏感数据
+      receivedChunks = [];
+      sharedKey = null;
+      ecdhKeyPair = null;
+      if (imageObjectUrl) {
+        URL.revokeObjectURL(imageObjectUrl);
+        imageObjectUrl = null;
+      }
+    }
+
+    // 页面卸载时清理
+    window.addEventListener('beforeunload', cleanup);
+  </script>
+</body>
+</html>
